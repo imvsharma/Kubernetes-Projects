@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: nginx-health
+  labels: 
+    app: nginx-health
+    environment: dev
+
+spec:
+  replicas: 3
+
+  selector:
+    matchLabels:
+      app: nginx-health
+  
+  template:
+    metadata:
+      labels: 
+        app: nginx-health
+
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.25-alpine
+        ports:
+        - containerPort: 80
