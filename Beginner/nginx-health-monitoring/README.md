@@ -10,6 +10,7 @@ A Kubernetes deployment example that runs Nginx with high availability, self-hea
 - [Prerequisites](#prerequisites)
 - [Step 1: Deployment](#step-1-deployment)
 - [Step 2: Service](#step-2-service)
+- [Step 3: ConfigMap](#step-3-configmap)
 - [Operations](#operations)
 - [Cleanup](#cleanup)
 - [Concepts Summary](#concepts-summary)
@@ -27,7 +28,7 @@ This project demonstrates production-style workload patterns on Kubernetes:
 | **Rolling updates** | New versions deploy with zero downtime |
 | **Scaling** | Scale replica count up or down on demand |
 
-Single-pod workloads are not suitable for production. This guide uses a **Deployment** (Step 1) and a **Service** (Step 2) to run and expose Nginx in a production-like way.
+Single-pod workloads are not suitable for production. This guide uses a **Deployment** (Step 1), a **Service** (Step 2), and a **ConfigMap** (Step 3) to run, expose, and configure Nginx in a production-like way.
 
 ---
 
@@ -282,6 +283,172 @@ If you get **200** and Nginx HTML, the Service is correctly routing traffic to t
 
 ---
 
+## Step 3: ConfigMap
+
+### Architecture
+
+```
+    Client (browser/curl)              Service                    Deployment
+            │                          │                              │
+            │  http://.../health.html  │   selector:                  │
+            │ ────────────────────────►│   app=nginx-health           │
+            │                          │ ──────────────────────────►  │
+            │                          │                              │
+            │                          │         ┌─────────┬─────────┬─────────┐
+            │                          │         │         │         │         │
+            │                          │         ▼         ▼         ▼         │
+            │                          │        Pod 1     Pod 2     Pod 3      │
+            │                          │         │         │         │         │
+            │                          │         └─────────┴────┬────┴─────────┘
+            │                          │                        │
+            │                          │                        │ volumeMount
+            │                          │                        ▼
+            │                          │                ┌───────────────┐
+            │                          │                │  ConfigMap    │
+            │                          │                │  health.html  │
+            │                          │                └───────────────┘
+            │                          │
+            ◄──────────────────────────┴──  response: Status: OK
+```
+
+The ConfigMap holds the `health.html` content. Each Pod mounts it at `/usr/share/nginx/html/health.html`, so the same health page is served by every replica without rebuilding the image.
+
+### What is a ConfigMap?
+
+A **ConfigMap** stores non-sensitive configuration data (files, env vars, or key-value pairs). Pods mount it as a volume or inject it as environment variables. Config stays separate from the container image so you can change it without rebuilding.
+
+### Why use a ConfigMap for the health page?
+
+| Without ConfigMap | With ConfigMap |
+|-------------------|----------------|
+| Health page baked into image; change requires rebuild. | Update `health.html` by editing ConfigMap and rolling Pods. |
+| Config and app tightly coupled. | Config and app decoupled; same image, different config per env. |
+| No single source of truth for config. | One ConfigMap shared by all replicas. |
+
+**Production note:** ConfigMaps are for non-sensitive data (app config, HTML templates, env vars, logging config, feature flags). For secrets use [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/).
+
+### Manifest: `manifest/configMap.yaml`
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: nginx-health-config
+
+data:
+  health.html: |
+    <html>
+    <body>
+    <h1>Status: OK</h1>
+    <p>Service: nginx-health</p>
+    </body>
+    </html>
+```
+
+The `data` key `health.html` becomes a file when the ConfigMap is mounted as a volume.
+
+### Update Deployment to use ConfigMap
+
+Add a **volume** (from the ConfigMap) and a **volumeMount** (into the container) so Nginx serves the ConfigMap content at `/usr/share/nginx/html/health.html`:
+
+**Relevant addition to `manifest/deployment.yaml`:**
+
+```yaml
+spec:
+  template:
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.25-alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: health-volume
+              mountPath: /usr/share/nginx/html/health.html
+              subPath: health.html
+      volumes:
+        - name: health-volume
+          configMap:
+            name: nginx-health-config
+```
+
+- **`volumeMounts`** — Mounts the ConfigMap entry as a file at the given path. `subPath: health.html` uses only that key from the ConfigMap (so the file is named `health.html`).
+- **`volumes`** — Defines a volume backed by the ConfigMap `nginx-health-config`.
+
+This overrides the default Nginx index at that path so `/health.html` serves your custom page.
+
+### Apply resources
+
+From the project root, apply in order (ConfigMap first so the Deployment can mount it):
+
+```bash
+kubectl apply -f manifest/configMap.yaml
+kubectl apply -f manifest/deployment.yaml
+kubectl apply -f manifest/service.yaml
+```
+
+Or apply everything in the manifest directory:
+
+```bash
+kubectl apply -f manifest/
+```
+
+Expected (if creating for the first time):
+
+```
+configmap/nginx-health-config created
+deployment.apps/nginx-health configured
+service/nginx-health-service unchanged
+```
+
+### Verify ConfigMap
+
+**List ConfigMaps:**
+
+```bash
+kubectl get configmap nginx-health-config
+```
+
+| NAME                 | DATA |
+|----------------------|------|
+| nginx-health-config  | 1    |
+
+**Inspect the stored data:**
+
+```bash
+kubectl get configmap nginx-health-config -o yaml
+```
+
+### Test the health page
+
+Port-forward the Service to localhost:
+
+```bash
+kubectl port-forward svc/nginx-health-service 8080:80
+```
+
+In another terminal, or in a browser:
+
+```bash
+curl -s http://localhost:8080/health.html
+```
+
+Or open in a browser: **http://localhost:8080/health.html**
+
+Expected response body:
+
+```html
+Status: OK
+Service: nginx-health
+```
+
+Stop the port-forward with `Ctrl+C`.
+
+**Concepts in this step:** ConfigMap, `data` (file content), volume, volumeMount, subPath, decoupling config from image, updating config without rebuilding.
+
+---
+
 ## Operations
 
 ### Self-healing
@@ -363,11 +530,12 @@ kubectl rollout undo deployment/nginx-health
 
 ## Cleanup
 
-Remove the Service and Deployment (and all managed Pods):
+Remove the Service, Deployment, and ConfigMap (and all managed Pods):
 
 ```bash
 kubectl delete -f manifest/service.yaml
 kubectl delete -f manifest/deployment.yaml
+kubectl delete -f manifest/configMap.yaml
 ```
 
 Or delete all resources in the manifest directory:
@@ -381,6 +549,7 @@ Or by name:
 ```bash
 kubectl delete service nginx-health-service
 kubectl delete deployment nginx-health
+kubectl delete configmap nginx-health-config
 ```
 
 ---
@@ -393,6 +562,8 @@ kubectl delete deployment nginx-health
 | **ReplicaSet** | Keeps the desired number of Pods running |
 | **Service** | Stable network endpoint (DNS + virtual IP) that load-balances to Pods matching the selector |
 | **ClusterIP** | Default Service type; internal-only, reachable from within the cluster |
+| **ConfigMap** | Stores non-sensitive configuration data; mounted as files or env vars |
+| **Volume / volumeMount** | Injects ConfigMap (or other storage) into a container at a path |
 | **Self-healing** | Failed or deleted Pods are replaced automatically |
 | **Rolling updates** | New version deployed with zero downtime |
 | **Scaling** | Change replica count to handle more or less load |
@@ -404,3 +575,4 @@ kubectl delete deployment nginx-health
 - Expose the Service externally: use [NodePort](https://kubernetes.io/docs/concepts/services-networking/service/#type-nodeport) or [LoadBalancer](https://kubernetes.io/docs/concepts/services-networking/service/#loadbalancer) for access from outside the cluster.
 - Add [liveness and readiness probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/) to the container spec for better health checks.
 - Use [Resource requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) for CPU and memory.
+- For sensitive data (passwords, tokens, certs), use [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) instead of ConfigMaps.

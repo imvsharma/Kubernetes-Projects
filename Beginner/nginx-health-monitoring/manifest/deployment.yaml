@@ -25,3 +25,13 @@ spec:
         image: nginx:1.25-alpine
         ports:
         - containerPort: 80
+
+        volumeMounts:
+        - name: health-volume
+          mountPath: /usr/share/nginx/html/health.html
+          subPath: health.html
+
+      volumes: 
+      - name: health-volume
+        configMap:
+          name: nginx-health-config
