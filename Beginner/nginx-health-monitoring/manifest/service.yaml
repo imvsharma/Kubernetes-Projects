@@ -1,0 +1,14 @@
+apiVersion: v1                    
+kind: Service                     # Resource type being defined
+metadata:                         
+  name: nginx-health-service      # Unique name of the service
+  labels:
+    app: nginx-health             # Label for identification
+spec:
+  type: ClusterIP                 # Internal-only IP (default type)
+  selector:
+    app: nginx-health             # Must match labels on your Pods
+  ports:
+    - port: 80                    # Port the service stays open on
+      targetPort: 80              # Port the app runs on inside the Pod
+      protocol: TCP               # Communication standard used
